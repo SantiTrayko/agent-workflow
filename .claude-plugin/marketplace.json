@@ -1,0 +1,14 @@
+{
+  "name": "agent-workflow",
+  "description": "Kit personal de flujo de trabajo con agentes",
+  "owner": {
+    "name": "Santi"
+  },
+  "plugins": [
+    {
+      "name": "flow",
+      "source": "./plugin",
+      "description": "Flujo por fases para tickets: refine → plan → implement → review → ship"
+    }
+  ]
+}

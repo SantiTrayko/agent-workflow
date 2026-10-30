@@ -1,0 +1,41 @@
+filters:
+  and:
+    - file.name == "status"
+properties:
+  note.ticket:
+    displayName: Ticket
+  note.titulo:
+    displayName: Título
+  note.fase:
+    displayName: Fase
+  note.repos:
+    displayName: Repos
+  note.issue:
+    displayName: Issue
+  note.creado:
+    displayName: Creado
+views:
+  - type: table
+    name: Activos
+    filters:
+      not:
+        - file.inFolder("_archive")
+    groupBy:
+      property: note.fase
+      direction: ASC
+    order:
+      - note.ticket
+      - note.titulo
+      - note.repos
+      - note.issue
+      - note.creado
+  - type: table
+    name: Archivados
+    filters:
+      and:
+        - file.inFolder("_archive")
+    order:
+      - note.ticket
+      - note.titulo
+      - note.repos
+      - note.creado

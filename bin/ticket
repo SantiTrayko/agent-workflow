@@ -1,0 +1,294 @@
+#!/usr/bin/env bash
+# ticket — organiza tickets multi-repo con git worktrees + docs de fase
+#
+#   ticket new <ID> <slug>      ticket manual (ej: ticket new CAN-123 export-pdf)
+#   ticket new <repo>#<N> [slug] ticket desde un issue de GitHub (ej: ticket new growcore#12)
+#   ticket add <repo> [...]     crea un worktree por repo dentro del ticket (misma branch)
+#   ticket init <repo>          copia .agent-workflow.md (config del flujo) a la raíz del repo
+#   ticket ls                   lista tickets activos con su fase y repos
+#   ticket path <ID>            imprime la ruta del ticket (cd "$(ticket path 12)")
+#   ticket done                 quita los worktrees (si está todo pusheado) y archiva el ticket
+#   ticket vault                crea el vault de Obsidian en TICKETS_ROOT (si no existe)
+#
+# Config por variables de entorno (ponelas en ~/.zshrc si querés cambiarlas):
+#   TICKETS_ROOT          default: ~/Desktop/tickets
+#   REPOS_ROOT            default: ~/Desktop/projects
+#   TICKET_BRANCH_PREFIX  default: feat
+set -euo pipefail
+
+TICKETS_ROOT="${TICKETS_ROOT:-$HOME/Desktop/tickets}"
+REPOS_ROOT="${REPOS_ROOT:-$HOME/Desktop/projects}"
+BRANCH_PREFIX="${TICKET_BRANCH_PREFIX:-feat}"
+
+# Resolver la carpeta del kit aunque el script se llame por symlink
+SELF="$0"
+while [ -L "$SELF" ]; do
+  link="$(readlink "$SELF")"
+  case "$link" in /*) SELF="$link" ;; *) SELF="$(dirname "$SELF")/$link" ;; esac
+done
+KIT_DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+TEMPLATES="$KIT_DIR/templates"
+
+die() { echo "ticket: $*" >&2; exit 1; }
+
+usage() {
+  sed -n '2,16p' "$SELF" | sed 's/^# \{0,1\}//'
+}
+
+slugify() {
+  local s
+  # Sacar tildes (á→a, ñ→n) con perl, que viene en macOS; si falla, queda el texto original
+  s="$(printf '%s' "$1" | perl -CS -MUnicode::Normalize -pe '$_ = NFD($_); s/\p{Mn}//g' 2>/dev/null || printf '%s' "$1")"
+  printf '%s' "$s" | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-40 | sed -E 's/-+$//'
+}
+
+find_ticket_dir() {
+  local d="${1:-$PWD}"
+  while [ "$d" != "/" ]; do
+    if [ -f "$d/.ticket" ]; then echo "$d"; return 0; fi
+    d="$(dirname "$d")"
+  done
+  return 1
+}
+
+load_ticket() {
+  T="$(find_ticket_dir)" || die "no estás dentro de una carpeta de ticket (usá 'ticket new' o 'cd \"\$(ticket path <ID>)\"')"
+  # shellcheck disable=SC1091
+  . "$T/.ticket"
+}
+
+save_repos() {
+  local tmp
+  tmp="$(mktemp)"
+  grep -v '^REPOS=' "$T/.ticket" > "$tmp" || true
+  echo "REPOS=\"$REPOS\"" >> "$tmp"
+  mv "$tmp" "$T/.ticket"
+  set_front repos "[$(printf '%s' "$REPOS" | sed 's/ /, /g')]"
+}
+
+# Actualiza un campo del frontmatter de status.md (lo lee Obsidian)
+set_front() {
+  local key="$1" val="$2" tmp
+  tmp="$(mktemp)"
+  awk -v k="$key" -v v="$val" '
+    NR==1 && $0=="---" { infm=1; print; next }
+    infm && $0=="---" { infm=0; print; next }
+    infm && index($0, k":")==1 { print k": "v; next }
+    { print }
+  ' "$T/status.md" > "$tmp" && mv "$tmp" "$T/status.md"
+}
+
+# Crea el vault de Obsidian en TICKETS_ROOT la primera vez
+ensure_vault() {
+  local src="$KIT_DIR/obsidian"
+  [ -d "$src" ] || return 0
+  mkdir -p "$TICKETS_ROOT"
+  [ -d "$TICKETS_ROOT/.obsidian" ] || cp -R "$src/dot-obsidian" "$TICKETS_ROOT/.obsidian"
+  [ -e "$TICKETS_ROOT/Tickets.base" ] || cp "$src/Tickets.base" "$TICKETS_ROOT/Tickets.base"
+  [ -e "$TICKETS_ROOT/Inicio.md" ] || cp "$src/Inicio.md" "$TICKETS_ROOT/Inicio.md"
+}
+
+log_status() {
+  printf -- '- %s — %s\n' "$(date +%F)" "$1" >> "$T/status.md"
+}
+
+# Crea la carpeta del ticket a partir de las plantillas
+make_ticket_dir() {
+  local id="$1" name="$2" branch="$3" slug="$4"
+  local dir="$TICKETS_ROOT/$name"
+  [ -e "$dir" ] && die "ya existe $dir"
+  [ -d "$TEMPLATES" ] || die "no encuentro las plantillas en $TEMPLATES"
+  ensure_vault
+  mkdir -p "$dir"
+  cat > "$dir/.ticket" <<EOF
+ID="$id"
+SLUG="$slug"
+BRANCH="$branch"
+REPOS_ROOT="$REPOS_ROOT"
+ISSUE=""
+ISSUE_URL=""
+ISSUE_REPO=""
+REPOS=""
+EOF
+  local f
+  for f in spec plan decisions status; do
+    sed -e "s|{{ID}}|$id|g" -e "s|{{SLUG}}|$slug|g" \
+        -e "s|{{BRANCH}}|$branch|g" -e "s|{{DATE}}|$(date +%F)|g" \
+        "$TEMPLATES/$f.md" > "$dir/$f.md"
+  done
+  echo "$dir"
+}
+
+cmd_new() {
+  [ $# -ge 1 ] || die "uso: ticket new <ID> <slug>  |  ticket new <repo>#<N> [slug]"
+  case "$1" in
+    *#*) cmd_new_issue "$@" ;;
+    *)   cmd_new_manual "$@" ;;
+  esac
+}
+
+cmd_new_manual() {
+  [ $# -ge 2 ] || die "uso: ticket new <ID> <slug>   ej: ticket new CAN-123 export-pdf"
+  local id="$1" slug
+  slug="$(slugify "$2")"
+  local name="$id-$slug" branch="$BRANCH_PREFIX/$id-$slug" dir
+  dir="$(make_ticket_dir "$id" "$name" "$branch" "$slug")"
+  echo "✓ Ticket creado: $dir"
+  echo "  Branch: $branch"
+  echo "  Siguiente: cd \"\$(ticket path $id)\" y en el agente /flow:refine"
+}
+
+cmd_new_issue() {
+  local repo="${1%%#*}" num="${1##*#}" slug="${2:-}"
+  [ -n "$repo" ] && [ -n "$num" ] || die "uso: ticket new <repo>#<N>   ej: ticket new growcore#12"
+  case "$num" in *[!0-9]*) die "el número de issue tiene que ser numérico: $num" ;; esac
+  local src="$REPOS_ROOT/$repo"
+  git -C "$src" rev-parse --git-dir >/dev/null 2>&1 || die "$src no es un repo git"
+  command -v gh >/dev/null 2>&1 || die "necesito la CLI de GitHub: brew install gh && gh auth login"
+
+  local title url body_file
+  title="$(cd "$src" && gh issue view "$num" --json title -q .title)" || die "no pude leer el issue #$num (¿gh auth login? ¿el repo tiene remoto en GitHub?)"
+  url="$(cd "$src" && gh issue view "$num" --json url -q .url)"
+  body_file="$(mktemp)"
+  (cd "$src" && gh issue view "$num" --json body -q .body) > "$body_file"
+
+  [ -n "$slug" ] || slug="$(slugify "$title")"
+  [ -n "$slug" ] || slug="issue"
+  slug="$(slugify "$slug")"
+  local id="#$num" name="$repo-$num-$slug" branch="$BRANCH_PREFIX/$num-$slug" dir
+  dir="$(make_ticket_dir "$id" "$name" "$branch" "$slug")"
+
+  # Datos del issue en .ticket y en el spec
+  sed -i.bak -e "s|^ISSUE=\"\"|ISSUE=\"$num\"|" -e "s|^ISSUE_URL=\"\"|ISSUE_URL=\"$url\"|" \
+      -e "s|^ISSUE_REPO=\"\"|ISSUE_REPO=\"$repo\"|" "$dir/.ticket" && rm -f "$dir/.ticket.bak"
+  {
+    echo "**Issue:** [#$num $title]($url)"
+    echo
+    cat "$body_file"
+  } > "$body_file.full"
+  awk -v f="$body_file.full" '
+    /^_\(pegado tal cual llegó\)_$/ { while ((getline l < f) > 0) print l; next } { print }
+  ' "$dir/spec.md" > "$dir/spec.md.tmp" && mv "$dir/spec.md.tmp" "$dir/spec.md"
+  rm -f "$body_file" "$body_file.full"
+  printf -- '- %s — creado desde el issue #%s\n' "$(date +%F)" "$num" >> "$dir/status.md"
+  (T="$dir"; set_front issue "\"$url\""; set_front titulo "\"$(printf '%s' "$title" | sed 's/"/\\"/g')\"")
+
+  echo "✓ Ticket creado desde #$num: $title"
+  echo "  $dir"
+  echo "  Branch: $branch"
+  # El repo del issue entra siempre en el alcance
+  (cd "$dir" && "$SELF" add "$repo")
+  echo "  Siguiente: cd \"\$(ticket path $num)\" y en el agente /flow:refine (el issue ya está en spec.md)"
+}
+
+cmd_add() {
+  [ $# -ge 1 ] || die "uso: ticket add <repo> [repo...]   (nombres de carpeta dentro de $REPOS_ROOT)"
+  load_ticket
+  local repo src dest base
+  for repo in "$@"; do
+    src="$REPOS_ROOT/$repo"
+    dest="$T/.wt/$repo"
+    mkdir -p "$T/.wt"
+    git -C "$src" rev-parse --git-dir >/dev/null 2>&1 || die "$src no es un repo git"
+    git -C "$src" rev-parse --verify HEAD >/dev/null 2>&1 || die "$repo no tiene commits todavía (hacé un commit inicial)"
+    if [ -e "$dest" ]; then echo "· $repo ya está en el ticket"; continue; fi
+
+    # Traer lo último del remoto si hay (best effort, sin cortar si no hay red)
+    git -C "$src" fetch --quiet origin 2>/dev/null || true
+
+    if git -C "$src" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+      git -C "$src" worktree add "$dest" "$BRANCH"
+    else
+      # Partir de la rama default del remoto si existe; si no, del HEAD local
+      base="$(git -C "$src" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || echo HEAD)"
+      # --no-track: que la branch nueva no quede apuntando a main como upstream
+      git -C "$src" worktree add --no-track -b "$BRANCH" "$dest" "$base"
+    fi
+
+    case " $REPOS " in *" $repo "*) ;; *) REPOS="${REPOS:+$REPOS }$repo" ;; esac
+    save_repos
+    log_status "worktree agregado: $repo"
+    [ -f "$dest/.agent-workflow.md" ] || echo "  ! $repo no tiene .agent-workflow.md (las skills usan defaults). Creala con: ticket init $repo"
+    echo "✓ $repo → $dest ($BRANCH)"
+  done
+}
+
+cmd_init() {
+  [ $# -eq 1 ] || die "uso: ticket init <repo>"
+  local dest="$REPOS_ROOT/$1/.agent-workflow.md"
+  [ -d "$REPOS_ROOT/$1" ] || die "no existe $REPOS_ROOT/$1"
+  [ -e "$dest" ] && die "ya existe $dest"
+  cp "$TEMPLATES/agent-workflow.md" "$dest"
+  echo "✓ Creado $dest"
+  echo "  Editalo (branch, commits, PRs, tests, datos sensibles) y commitealo en el repo."
+}
+
+cmd_ls() {
+  [ -d "$TICKETS_ROOT" ] || { echo "(no hay tickets en $TICKETS_ROOT)"; return 0; }
+  local d phase found=0
+  for d in "$TICKETS_ROOT"/*/; do
+    [ -f "$d.ticket" ] || continue
+    found=1
+    phase="$(grep -m1 '^fase:' "$d/status.md" 2>/dev/null | sed 's/^fase: *//' || true)"
+    ( . "$d.ticket"; printf '%-40s %-16s %s\n' "$(basename "$d")" "${phase:-?}" "${REPOS:-(sin repos)}" )
+  done
+  [ $found -eq 1 ] || echo "(no hay tickets activos en $TICKETS_ROOT)"
+}
+
+cmd_path() {
+  [ $# -eq 1 ] || die "uso: ticket path <ID o número de issue>"
+  local q="${1#\#}" m
+  for m in "$TICKETS_ROOT/$q" "$TICKETS_ROOT/$q"-* "$TICKETS_ROOT"/*-"$q"-*; do
+    if [ -f "$m/.ticket" ]; then echo "$m"; return 0; fi
+  done
+  die "no encontré el ticket $1 en $TICKETS_ROOT"
+}
+
+cmd_done() {
+  load_ticket
+  local repo dest problems=0 base
+  for repo in $REPOS; do
+    dest="$T/.wt/$repo"
+    [ -d "$dest" ] || continue
+    if [ -n "$(git -C "$dest" status --porcelain)" ]; then
+      echo "✗ $repo: hay cambios sin commitear"; problems=1
+    fi
+    if ! git -C "$dest" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
+      # Sin upstream: solo es problema si la branch tiene commits propios
+      base="$(git -C "$dest" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || echo main)"
+      if [ -n "$(git -C "$dest" log "$base..HEAD" --oneline 2>/dev/null || echo x)" ]; then
+        echo "✗ $repo: la branch tiene commits y no está pusheada (git push -u origin HEAD)"; problems=1
+      fi
+    elif [ -n "$(git -C "$dest" log '@{u}..' --oneline)" ]; then
+      echo "✗ $repo: hay commits sin pushear"; problems=1
+    fi
+  done
+  [ $problems -eq 0 ] || die "resolvé lo de arriba antes de cerrar. Las branches nunca se borran, solo los worktrees."
+
+  for repo in $REPOS; do
+    if [ -d "$T/.wt/$repo" ]; then
+      git -C "$REPOS_ROOT/$repo" worktree remove "$T/.wt/$repo"
+      echo "✓ worktree $repo removido (la branch $BRANCH se conserva)"
+    fi
+  done
+  rmdir "$T/.wt" 2>/dev/null || true
+  set_front fase cerrado
+  log_status "ticket cerrado"
+  mkdir -p "$TICKETS_ROOT/_archive"
+  mv "$T" "$TICKETS_ROOT/_archive/"
+  echo "✓ Archivado en $TICKETS_ROOT/_archive/$(basename "$T")"
+  echo "  (si estabas parado adentro, hacé cd a otro lado)"
+}
+
+case "${1:-}" in
+  new)      shift; cmd_new "$@" ;;
+  add)      shift; cmd_add "$@" ;;
+  init)     shift; cmd_init "$@" ;;
+  ls|list)  cmd_ls ;;
+  path)     shift; cmd_path "$@" ;;
+  done)     cmd_done ;;
+  vault)    ensure_vault; echo "✓ Vault listo en $TICKETS_ROOT (abrilo en Obsidian: Open folder as vault)" ;;
+  ""|-h|--help|help) usage ;;
+  *)        die "comando desconocido: $1 (probá 'ticket help')" ;;
+esac

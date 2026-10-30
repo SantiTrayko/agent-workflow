@@ -1,0 +1,8 @@
+{
+  "name": "flow",
+  "version": "0.6.0",
+  "description": "Flujo por fases para tickets multi-repo: refinar, planificar, implementar, revisar y abrir PRs. Cada fase deja un archivo en la carpeta del ticket.",
+  "author": {
+    "name": "Santi"
+  }
+}
