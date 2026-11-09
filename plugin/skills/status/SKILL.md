@@ -7,10 +7,10 @@ description: Muestra en qué fase está el ticket actual, el estado de cada work
 
 1. Buscá `.ticket` en el directorio actual o sus padres → `$T`. Si no hay, corré `ticket ls` y mostrá los tickets activos.
 2. Leé `.ticket`, `status.md`, y por encima `spec.md`, `plan.md` y `decisions.md`.
-3. Por cada repo de `REPOS`: `git -C $T/.wt/<repo> status --short` y `git -C $T/.wt/<repo> log --oneline -5`. Si hay PRs en `status.md`, `gh pr view <url> --json state,reviewDecision -q '.state + " " + .reviewDecision'`.
+3. Por cada repo de `REPOS`: `git -C $T/.wt/<repo> status --short`, `git -C $T/.wt/<repo> diff --cached --stat` y `git -C $T/.wt/<repo> log --oneline -5`. Si hay PRs en `status.md`, `gh pr view <url> --json state,reviewDecision -q '.state + " " + .reviewDecision'`.
 4. Respondé corto, en este orden:
-   - Ticket (ID y link al issue si hay), fase actual (campo `fase` del frontmatter de `status.md`) y checkpoints tildados.
-   - Por repo: commits, cambios sin commitear, si está pusheado y estado del PR.
+   - Ticket: ID y link a la tarea (`SOURCE_URL`, o `ISSUE_URL` en tickets viejos) con la plataforma (`SOURCE`). Si no tiene ninguno es un ticket manual: no lo marques como faltante. Fase actual (campo `fase` del frontmatter de `status.md`) y checkpoints tildados.
+   - Por repo: commits, cambios en staging (con `Commits en implement: stage` es normal que el trabajo esté ahí hasta `/flow:ship`), cambios sin stagear, si está pusheado y estado del PR.
    - Tareas del plan: hechas / total y cuál es la próxima.
    - Decisiones pendientes de aprobar en `decisions.md`.
    - **Próximo paso:** el comando concreto (`/flow:refine`, `ticket add …`, `/flow:plan`, `/flow:implement <repo>`, `/flow:review`, `/flow:ship`, `ticket done`).

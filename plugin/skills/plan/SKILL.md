@@ -38,9 +38,11 @@ Si hay decisiones con más de una opción razonable (modelo de datos, dónde viv
 Todo AC del spec tiene que estar cubierto por al menos una tarea. Si alguno no lo está, decilo.
 
 ## 4. Challenge (antes de pedir aprobación)
-Correlo cuando el plan esté completo, salvo que: la config diga "Challenger: no", el plan tenga menos tareas que el mínimo de la config (default 4), `$ARGUMENTS` incluya `--skip-challenge`, o `opencode` no esté instalado (en ese caso avisá).
+Correlo cuando el plan esté completo, salvo que: la config diga "Challenger: no", el plan tenga menos tareas que el mínimo de la config (default 4), `$ARGUMENTS` incluya `--skip-challenge`, o el motor sea `opencode` y no esté instalado (en ese caso avisá).
 
-1. Lanzá el challenger desde el worktree principal (el spec y el plan van adjuntos porque están fuera del repo):
+1. Lanzá el challenger según el "Motor" de la config (default `opencode`):
+   - **`claude`:** subagente `challenger` (Opus, contexto fresco) con la ruta de `$T` y los repos del ticket. Guardá su respuesta tal cual en `$T/challenge.md`.
+   - **`opencode`:** desde el worktree principal (el spec y el plan van adjuntos porque están fuera del repo):
    ```bash
    cd "$T/.wt/<repo principal>" && opencode run --agent <agente, default flow-challenger> -m <modelo de la config> \
      -f "$T/spec.md" -f "$T/plan.md" \

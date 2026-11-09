@@ -1,27 +1,36 @@
 # Configuración del flujo de agentes
 
 <!--
-Este archivo va en la raíz de cada repo (`ticket init <repo>` lo copia).
-Todas las skills /ticket-* lo leen antes de trabajar y sus reglas mandan sobre los defaults.
+Este archivo va en la raíz de cada repo (`ticket init <repo>` lo crea). Es local: queda en
+.git/info/exclude, nunca se commitea, y cada worktree de un ticket lo ve por symlink.
+Todas las skills /flow:* lo leen antes de trabajar y sus reglas mandan sobre los defaults.
 Si un ticket abarca varios repos, se aplican las reglas de cada repo a su parte.
 Borrá o completá lo que no aplique.
 -->
 
 ## Tickets
-- **Origen:** github-issues   <!-- github-issues | manual -->
+<!--
+Plataforma donde viven las tareas. El link de cada ticket se guarda con
+`ticket new <ID> <slug> --link <url>` o `ticket link <url>`; los issues de GitHub con `ticket new <repo>#<N>`.
+-->
+- **Origen:** github   <!-- github | seeble | jira | linear | … | manual -->
+- **Cómo leer una tarea:** `gh issue view <N> --comments`
+  <!-- Otra plataforma: las tools MCP a usar y de dónde sale el id. Ej. Seeble: mcp__seeble__get_task + mcp__seeble__list_comments con el task_id del final de la URL. Sin tool: "pedir que la peguen". -->
+- **Referencia en el PR:** `Closes #<id>`   <!-- Ej. otra plataforma: "Ticket: <link>" -->
+- **Comentar en la tarea al cerrar fases:** ofrecer, siempre preguntando antes   <!-- ofrecer | no -->
 - **Formato de ID:** #<número de issue>
 - **Idioma del spec y de las preguntas para producto:** español
 
 ## Git
-- **Branch:** feat/<id>-<slug>          <!-- fix/... para bugs -->
+- **Branch:** feat/<id>-<slug>          <!-- `ticket` toma el prefijo (lo de antes de la "/"); fix/... para bugs -->
 - **Commit:** `<tipo>(<scope>): <descripción> (#<id>)`   <!-- conventional commits -->
+- **Commits en implement:** stage   <!-- stage: cada tarea queda en staging y /flow:ship commitea con tu aprobación | por-tarea: un commit por tarea -->
 - **Rama base:** main
 
 ## Pull requests
 - **Título:** `<tipo>: <resumen> (#<id>)`
 - **Idioma:** español
 - **Draft por defecto:** sí
-- **Cierra el issue:** sí (`Closes #<id>` en el cuerpo)
 - **Secciones del cuerpo:** Qué cambia · Por qué · Decisiones · Cómo probar · Checklist
 
 ## Calidad
@@ -43,8 +52,9 @@ Modelos: ver `opencode models opencode-go`. Cambialos acá cuando compares resul
 
 ## Challenge del plan
 - **Challenger:** sí
-- **Agente:** flow-challenger
-- **Modelo:** opencode-go/kimi-k3   <!-- corre una vez por ticket: puede ser el modelo más capaz aunque tenga poca cuota -->
+- **Motor:** opencode   <!-- opencode: otro modelo vía OpenCode | claude: subagente challenger de Claude Code (Opus, contexto fresco) -->
+- **Agente:** flow-challenger   <!-- solo motor opencode -->
+- **Modelo:** opencode-go/kimi-k3   <!-- solo motor opencode -->   <!-- corre una vez por ticket: puede ser el modelo más capaz aunque tenga poca cuota -->
 - **Mínimo de tareas para correrlo:** 4   <!-- planes más chicos lo saltean -->
 
 ## Revisión

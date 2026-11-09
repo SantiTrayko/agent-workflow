@@ -11,7 +11,7 @@ Coordinás revisores independientes que **no vieron cómo se escribió el códig
 1. Buscá `.ticket` en el directorio actual o sus padres → `$T`. Leé `.ticket`, `status.md`, `spec.md`, `plan.md` y `decisions.md`.
 2. **Config del proyecto:** leé `.agent-workflow.md` de cada worktree: sección "Revisión" (¿se usa el reviewer de OpenCode?, ¿verificación de UI?), "Calidad" (dev server) y "Datos sensibles".
 3. Para cada repo de `REPOS`, calculá la base del diff: `git -C $T/.wt/<repo> merge-base HEAD origin/HEAD` (si falla, la rama base de la config, o `main`).
-4. Si hay cambios sin commitear en algún worktree, avisale al usuario antes de seguir.
+4. **Qué se revisa:** lo commiteado más lo que está en staging (con "Commits en implement: stage", el default, el trabajo vive en staging hasta `/flow:ship`). El diff de cada repo es `git diff --cached <base>`; pasáselo así a todos los revisores. Si hay cambios **sin stagear**, avisale al usuario antes de seguir: no entran en la revisión.
 
 ## 1. Lanzar revisores (en paralelo)
 **a) Resumen de decisiones**: subagente `decisions-summarizer` con la ruta de `$T`. Siempre.
@@ -20,7 +20,7 @@ Coordinás revisores independientes que **no vieron cómo se escribió el códig
 ```bash
 cd "$T/.wt/<repo>" && opencode run --agent <agente del reviewer, default flow-reviewer> -m <modelo del reviewer> \
   -f "$T/spec.md" -f "$T/plan.md" -f "$T/decisions.md" \
-  "Revisá los cambios de esta branch contra <base> (git diff <base>...HEAD). El ticket está en los adjuntos." \
+  "Revisá los cambios de esta branch contra <base>, incluyendo lo que está en staging (git diff --cached <base>). El ticket está en los adjuntos." \
   > "$T/review-<repo>.md" 2>&1
 ```
 Si `opencode` no está o el agente no existe (`opencode agent list`), avisá y seguí.

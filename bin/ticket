@@ -1,24 +1,29 @@
 #!/usr/bin/env bash
 # ticket — organiza tickets multi-repo con git worktrees + docs de fase
 #
-#   ticket new <ID> <slug>      ticket manual (ej: ticket new CAN-123 export-pdf)
+#   ticket new <ID> <slug> [--link <url>] [--source <plataforma>]
+#                               ticket manual, opcionalmente vinculado a una tarea de cualquier
+#                               plataforma (ej: ticket new CAN-123 export-pdf --link https://seeble.io/...)
 #   ticket new <repo>#<N> [slug] ticket desde un issue de GitHub (ej: ticket new growcore#12)
+#   ticket link <url> [--source <plataforma>]  vincula el ticket actual a una tarea
 #   ticket add <repo> [...]     crea un worktree por repo dentro del ticket (misma branch)
-#   ticket init <repo>          copia .agent-workflow.md (config del flujo) a la raíz del repo
+#   ticket init <repo>          crea .agent-workflow.md (config local del flujo, nunca se commitea)
 #   ticket ls                   lista tickets activos con su fase y repos
 #   ticket path <ID>            imprime la ruta del ticket (cd "$(ticket path 12)")
 #   ticket done                 quita los worktrees (si está todo pusheado) y archiva el ticket
 #   ticket vault                crea el vault de Obsidian en TICKETS_ROOT (si no existe)
 #
 # Config por variables de entorno (ponelas en ~/.zshrc si querés cambiarlas):
-#   TICKETS_ROOT          default: ~/Desktop/tickets
-#   REPOS_ROOT            default: ~/Desktop/projects
-#   TICKET_BRANCH_PREFIX  default: feat
+#   TICKETS_ROOT          default: ~/tickets
+#   REPOS_ROOT            default: ~/projects
+#   TICKET_BRANCH_PREFIX  fuerza el prefijo de branch. Si no está, manda el "Branch:" de
+#                         .agent-workflow.md del repo, y si tampoco hay, "feat"
 set -euo pipefail
 
-TICKETS_ROOT="${TICKETS_ROOT:-$HOME/Desktop/tickets}"
-REPOS_ROOT="${REPOS_ROOT:-$HOME/Desktop/projects}"
-BRANCH_PREFIX="${TICKET_BRANCH_PREFIX:-feat}"
+TICKETS_ROOT="${TICKETS_ROOT:-$HOME/tickets}"
+REPOS_ROOT="${REPOS_ROOT:-$HOME/projects}"
+DEFAULT_BRANCH_PREFIX="feat"
+CONFIG_FILE=".agent-workflow.md"
 
 # Resolver la carpeta del kit aunque el script se llame por symlink
 SELF="$0"
@@ -32,7 +37,8 @@ TEMPLATES="$KIT_DIR/templates"
 die() { echo "ticket: $*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,16p' "$SELF" | sed 's/^# \{0,1\}//'
+  # The header comment block is the help text
+  awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$SELF"
 }
 
 slugify() {
@@ -58,13 +64,60 @@ load_ticket() {
   . "$T/.ticket"
 }
 
-save_repos() {
-  local tmp
+# Sets (or adds) a KEY="value" line in a .ticket file; the file is sourced, so the value is escaped
+set_ticket_var() {
+  local file="$1" key="$2" val tmp
+  val="$(printf '%s' "$3" | sed -e 's/[\\"$`]/\\&/g')"
   tmp="$(mktemp)"
-  grep -v '^REPOS=' "$T/.ticket" > "$tmp" || true
-  echo "REPOS=\"$REPOS\"" >> "$tmp"
-  mv "$tmp" "$T/.ticket"
+  grep -v "^$key=" "$file" > "$tmp" || true
+  printf '%s="%s"\n' "$key" "$val" >> "$tmp"
+  mv "$tmp" "$file"
+}
+
+save_repos() {
+  set_ticket_var "$T/.ticket" REPOS "$REPOS"
   set_front repos "[$(printf '%s' "$REPOS" | sed 's/ /, /g')]"
+}
+
+# Branch prefix from the "Branch:" line of a repo config (e.g. "feature/<id>-<slug>" -> "feature")
+config_branch_prefix() {
+  local cfg="$1/$CONFIG_FILE" prefix
+  [ -f "$cfg" ] || return 0
+  prefix="$(sed -n -E 's/^- \*\*Branch:\*\* *`?([A-Za-z0-9._-]+)\/.*/\1/p' "$cfg" | head -1)"
+  printf '%s' "$prefix"
+}
+
+# Prints "<prefix> <origin>": the env var wins, then the repo config, then the default
+resolve_branch_prefix() {
+  local repo_dir="${1:-}" prefix
+  if [ -n "${TICKET_BRANCH_PREFIX:-}" ]; then echo "$TICKET_BRANCH_PREFIX env"; return; fi
+  [ -n "$repo_dir" ] && prefix="$(config_branch_prefix "$repo_dir")"
+  if [ -n "${prefix:-}" ]; then echo "$prefix config"; else echo "$DEFAULT_BRANCH_PREFIX default"; fi
+}
+
+# Platform name from a task URL: github.com -> github, seeble.io -> seeble, acme.atlassian.net -> atlassian
+source_from_url() {
+  printf '%s' "$1" | sed -E 's|^[a-zA-Z]+://||; s|[/?#].*||; s|:.*||; s|^www\.||' \
+    | awk -F. '{ print (NF >= 2 ? $(NF-1) : $0) }' | tr '[:upper:]' '[:lower:]'
+}
+
+# Keeps the config out of every commit: info/exclude lives in the common git dir, shared by all worktrees
+ensure_config_excluded() {
+  local src="$1" common exclude
+  common="$(git -C "$src" rev-parse --path-format=absolute --git-common-dir)"
+  exclude="$common/info/exclude"
+  mkdir -p "$common/info"
+  grep -qxF "/$CONFIG_FILE" "$exclude" 2>/dev/null || echo "/$CONFIG_FILE" >> "$exclude"
+}
+
+# Symlinks the main checkout config into a worktree so there is a single copy to edit
+link_config() {
+  local src="$1" dest="$2"
+  # Already there: committed in the repo, or linked by a previous run
+  if [ -e "$dest/$CONFIG_FILE" ] || [ -L "$dest/$CONFIG_FILE" ]; then return 0; fi
+  [ -f "$src/$CONFIG_FILE" ] || return 1
+  ensure_config_excluded "$src"
+  ln -s "$src/$CONFIG_FILE" "$dest/$CONFIG_FILE"
 }
 
 # Actualiza un campo del frontmatter de status.md (lo lee Obsidian)
@@ -95,17 +148,22 @@ log_status() {
 
 # Crea la carpeta del ticket a partir de las plantillas
 make_ticket_dir() {
-  local id="$1" name="$2" branch="$3" slug="$4"
+  local id="$1" name="$2" branch="$3" slug="$4" prefix_from="$5"
   local dir="$TICKETS_ROOT/$name"
   [ -e "$dir" ] && die "ya existe $dir"
   [ -d "$TEMPLATES" ] || die "no encuentro las plantillas en $TEMPLATES"
   ensure_vault
   mkdir -p "$dir"
+  # SOURCE/SOURCE_URL: task on any platform. ISSUE*: only GitHub issues (used for Closes #N)
+  # BRANCH_PREFIX_FROM=default lets the first `ticket add` adopt the prefix of the repo config
   cat > "$dir/.ticket" <<EOF
 ID="$id"
 SLUG="$slug"
 BRANCH="$branch"
+BRANCH_PREFIX_FROM="$prefix_from"
 REPOS_ROOT="$REPOS_ROOT"
+SOURCE=""
+SOURCE_URL=""
 ISSUE=""
 ISSUE_URL=""
 ISSUE_REPO=""
@@ -120,8 +178,38 @@ EOF
   echo "$dir"
 }
 
+# Links a ticket dir to a task URL on any platform (.ticket, status frontmatter and spec)
+set_link() {
+  local dir="$1" url="$2" src="${3:-}"
+  [ -n "$src" ] || src="$(source_from_url "$url")"
+  [ -n "$src" ] || die "no pude deducir la plataforma de $url: pasala con --source <nombre>"
+  set_ticket_var "$dir/.ticket" SOURCE "$src"
+  set_ticket_var "$dir/.ticket" SOURCE_URL "$url"
+  (T="$dir"; set_front issue "\"$url\"")
+  # Replace an existing link line; otherwise add it above the "Ticket original" placeholder
+  awk -v u="$url" -v has="$(grep -c '^\*\*Ticket:\*\* ' "$dir/spec.md" || true)" '
+    index($0, "**Ticket:** ") == 1 { print "**Ticket:** " u; next }
+    has == 0 && /^_\(pegado tal cual llegó\)_$/ && !done { print "**Ticket:** " u; print ""; done=1 }
+    { print }
+  ' "$dir/spec.md" > "$dir/spec.md.tmp" && mv "$dir/spec.md.tmp" "$dir/spec.md"
+  printf -- '- %s — vinculado a %s: %s\n' "$(date +%F)" "$src" "$url" >> "$dir/status.md"
+}
+
+# Parses --link/--source out of the args; positional args are left in POSITIONAL
+parse_link_flags() {
+  LINK_URL="" LINK_SOURCE="" POSITIONAL=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --link)   [ $# -ge 2 ] || die "--link necesita una URL"; LINK_URL="$2"; shift 2 ;;
+      --source) [ $# -ge 2 ] || die "--source necesita un nombre"; LINK_SOURCE="$(slugify "$2")"; shift 2 ;;
+      --*)      die "opción desconocida: $1" ;;
+      *)        POSITIONAL+=("$1"); shift ;;
+    esac
+  done
+}
+
 cmd_new() {
-  [ $# -ge 1 ] || die "uso: ticket new <ID> <slug>  |  ticket new <repo>#<N> [slug]"
+  [ $# -ge 1 ] || die "uso: ticket new <ID> <slug> [--link <url>]  |  ticket new <repo>#<N> [slug]"
   case "$1" in
     *#*) cmd_new_issue "$@" ;;
     *)   cmd_new_manual "$@" ;;
@@ -129,14 +217,33 @@ cmd_new() {
 }
 
 cmd_new_manual() {
-  [ $# -ge 2 ] || die "uso: ticket new <ID> <slug>   ej: ticket new CAN-123 export-pdf"
-  local id="$1" slug
+  parse_link_flags "$@"
+  set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"
+  [ $# -ge 2 ] || die "uso: ticket new <ID> <slug> [--link <url>]   ej: ticket new CAN-123 export-pdf"
+  local id="$1" slug prefix prefix_from
   slug="$(slugify "$2")"
-  local name="$id-$slug" branch="$BRANCH_PREFIX/$id-$slug" dir
-  dir="$(make_ticket_dir "$id" "$name" "$branch" "$slug")"
+  # No repo yet: the env var or the default, adjusted later by the first `ticket add`
+  read -r prefix prefix_from <<< "$(resolve_branch_prefix)"
+  local name="$id-$slug" branch="$prefix/$id-$slug" dir
+  dir="$(make_ticket_dir "$id" "$name" "$branch" "$slug" "$prefix_from")"
+  [ -z "$LINK_URL" ] || set_link "$dir" "$LINK_URL" "$LINK_SOURCE"
   echo "✓ Ticket creado: $dir"
-  echo "  Branch: $branch"
+  if [ "$prefix_from" = default ]; then
+    echo "  Branch: $branch (el prefijo se ajusta al de la config del primer repo que agregues)"
+  else
+    echo "  Branch: $branch"
+  fi
+  [ -z "$LINK_URL" ] || echo "  Tarea: $LINK_URL"
   echo "  Siguiente: cd \"\$(ticket path $id)\" y en el agente /flow:refine"
+}
+
+cmd_link() {
+  parse_link_flags "$@"
+  [ ${#POSITIONAL[@]} -eq 0 ] || LINK_URL="${POSITIONAL[0]}"
+  [ -n "$LINK_URL" ] || die "uso: ticket link <url> [--source <plataforma>]"
+  load_ticket
+  set_link "$T" "$LINK_URL" "$LINK_SOURCE"
+  echo "✓ $ID vinculado a $LINK_URL"
 }
 
 cmd_new_issue() {
@@ -156,12 +263,18 @@ cmd_new_issue() {
   [ -n "$slug" ] || slug="$(slugify "$title")"
   [ -n "$slug" ] || slug="issue"
   slug="$(slugify "$slug")"
-  local id="#$num" name="$repo-$num-$slug" branch="$BRANCH_PREFIX/$num-$slug" dir
-  dir="$(make_ticket_dir "$id" "$name" "$branch" "$slug")"
+  local prefix prefix_from
+  # The issue repo is known up front, so its config sets the prefix right away
+  read -r prefix prefix_from <<< "$(resolve_branch_prefix "$src")"
+  local id="#$num" name="$repo-$num-$slug" branch="$prefix/$num-$slug" dir
+  dir="$(make_ticket_dir "$id" "$name" "$branch" "$slug" "$prefix_from")"
 
   # Datos del issue en .ticket y en el spec
-  sed -i.bak -e "s|^ISSUE=\"\"|ISSUE=\"$num\"|" -e "s|^ISSUE_URL=\"\"|ISSUE_URL=\"$url\"|" \
-      -e "s|^ISSUE_REPO=\"\"|ISSUE_REPO=\"$repo\"|" "$dir/.ticket" && rm -f "$dir/.ticket.bak"
+  set_ticket_var "$dir/.ticket" ISSUE "$num"
+  set_ticket_var "$dir/.ticket" ISSUE_URL "$url"
+  set_ticket_var "$dir/.ticket" ISSUE_REPO "$repo"
+  set_ticket_var "$dir/.ticket" SOURCE github
+  set_ticket_var "$dir/.ticket" SOURCE_URL "$url"
   {
     echo "**Issue:** [#$num $title]($url)"
     echo
@@ -185,14 +298,32 @@ cmd_new_issue() {
 cmd_add() {
   [ $# -ge 1 ] || die "uso: ticket add <repo> [repo...]   (nombres de carpeta dentro de $REPOS_ROOT)"
   load_ticket
-  local repo src dest base
+  local repo src dest base prefix prefix_from
   for repo in "$@"; do
     src="$REPOS_ROOT/$repo"
     dest="$T/.wt/$repo"
     mkdir -p "$T/.wt"
     git -C "$src" rev-parse --git-dir >/dev/null 2>&1 || die "$src no es un repo git"
     git -C "$src" rev-parse --verify HEAD >/dev/null 2>&1 || die "$repo no tiene commits todavía (hacé un commit inicial)"
-    if [ -e "$dest" ]; then echo "· $repo ya está en el ticket"; continue; fi
+    if [ -e "$dest" ]; then
+      # Re-running add on an existing worktree links a config created after it
+      link_config "$src" "$dest" && echo "· $repo ya está en el ticket" \
+        || echo "· $repo ya está en el ticket (sin $CONFIG_FILE: ticket init $repo)"
+      continue
+    fi
+
+    # The first repo of a ticket created with the default prefix adopts its config prefix
+    if [ -z "$REPOS" ] && [ "${BRANCH_PREFIX_FROM:-}" = default ]; then
+      read -r prefix prefix_from <<< "$(resolve_branch_prefix "$src")"
+      if [ "$prefix_from" = config ] && [ "${BRANCH%%/*}" != "$prefix" ]; then
+        BRANCH="$prefix/${BRANCH#*/}"
+        set_ticket_var "$T/.ticket" BRANCH "$BRANCH"
+        set_front branch "$BRANCH"
+        echo "· branch ajustada a la config de $repo: $BRANCH"
+      fi
+      BRANCH_PREFIX_FROM="$prefix_from"
+      set_ticket_var "$T/.ticket" BRANCH_PREFIX_FROM "$BRANCH_PREFIX_FROM"
+    fi
 
     # Traer lo último del remoto si hay (best effort, sin cortar si no hay red)
     git -C "$src" fetch --quiet origin 2>/dev/null || true
@@ -209,19 +340,32 @@ cmd_add() {
     case " $REPOS " in *" $repo "*) ;; *) REPOS="${REPOS:+$REPOS }$repo" ;; esac
     save_repos
     log_status "worktree agregado: $repo"
-    [ -f "$dest/.agent-workflow.md" ] || echo "  ! $repo no tiene .agent-workflow.md (las skills usan defaults). Creala con: ticket init $repo"
+    link_config "$src" "$dest" \
+      || echo "  ! $repo no tiene $CONFIG_FILE (las skills usan defaults). Creala con: ticket init $repo y corré de nuevo ticket add $repo"
     echo "✓ $repo → $dest ($BRANCH)"
   done
 }
 
 cmd_init() {
   [ $# -eq 1 ] || die "uso: ticket init <repo>"
-  local dest="$REPOS_ROOT/$1/.agent-workflow.md"
-  [ -d "$REPOS_ROOT/$1" ] || die "no existe $REPOS_ROOT/$1"
-  [ -e "$dest" ] && die "ya existe $dest"
-  cp "$TEMPLATES/agent-workflow.md" "$dest"
-  echo "✓ Creado $dest"
-  echo "  Editalo (branch, commits, PRs, tests, datos sensibles) y commitealo en el repo."
+  local src="$REPOS_ROOT/$1"
+  local dest="$src/$CONFIG_FILE"
+  [ -d "$src" ] || die "no existe $src"
+  git -C "$src" rev-parse --git-dir >/dev/null 2>&1 || die "$src no es un repo git"
+  if [ -e "$dest" ]; then
+    echo "· ya existe $dest"
+  else
+    cp "$TEMPLATES/agent-workflow.md" "$dest"
+    echo "✓ Creado $dest"
+  fi
+  if git -C "$src" ls-files --error-unmatch "$CONFIG_FILE" >/dev/null 2>&1; then
+    echo "  ! $CONFIG_FILE está commiteado en $1: el exclude no lo saca del repo (git rm --cached $CONFIG_FILE)"
+  else
+    ensure_config_excluded "$src"
+    echo "  Es local: quedó en .git/info/exclude, así que no entra en ningún commit de ningún worktree."
+  fi
+  echo "  Editalo (branch, commits, PRs, tests, datos sensibles). Los tickets lo ven por symlink;"
+  echo "  en uno que ya tenga el worktree de $1, corré ticket add $1 para enlazarlo."
 }
 
 cmd_ls() {
@@ -284,6 +428,7 @@ cmd_done() {
 case "${1:-}" in
   new)      shift; cmd_new "$@" ;;
   add)      shift; cmd_add "$@" ;;
+  link)     shift; cmd_link "$@" ;;
   init)     shift; cmd_init "$@" ;;
   ls|list)  cmd_ls ;;
   path)     shift; cmd_path "$@" ;;

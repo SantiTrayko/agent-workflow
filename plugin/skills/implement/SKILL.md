@@ -1,23 +1,27 @@
 ---
 name: implement
-description: Fase 3 del flujo. Ejecuta las tareas de plan.md en los worktrees del ticket (delegando las [delegable] a OpenCode y verificándolas), commitea por tarea, registra desvíos en decisions.md y frena ante cambios de alcance. Usar con /flow:implement [repo].
+description: Fase 3 del flujo. Ejecuta las tareas de plan.md en los worktrees del ticket (delegando las [delegable] a OpenCode y verificándolas), deja cada tarea en staging (o la commitea, si la config lo pide), registra desvíos en decisions.md y frena ante cambios de alcance. Usar con /flow:implement [repo].
 disable-model-invocation: true
 ---
 
 # Implementar el plan
 
-Ejecutás `plan.md` tarea por tarea. El plan es la fuente de verdad; cualquier desvío queda escrito. Sos responsable de la calidad de **cada** commit, lo hayas escrito vos o un modelo delegado.
+Ejecutás `plan.md` tarea por tarea. El plan es la fuente de verdad; cualquier desvío queda escrito. Sos responsable de la calidad de **cada** tarea que dejás en staging o commiteás, la hayas escrito vos o un modelo delegado.
 
 ## 0. Ubicarte y cargar la config
 1. Buscá `.ticket` en el directorio actual o sus padres → `$T`. Leé `.ticket`, `status.md`, `spec.md`, `plan.md` y `decisions.md`.
-2. **Config del proyecto:** leé `.agent-workflow.md` de cada worktree. De ahí salen el formato de commit, los comandos de test/lint, los datos sensibles y la sección "Delegación" (agente, modelos y modelos permitidos). Si falta, usá los defaults de abajo y no delegues.
+2. **Config del proyecto:** leé `.agent-workflow.md` de cada worktree. De ahí salen el modo de commits ("Commits en implement": `stage` o `por-tarea`, default `stage`), el formato de commit, los comandos de test/lint, los datos sensibles y la sección "Delegación" (agente, modelos y modelos permitidos). Si falta, usá los defaults de abajo y no delegues.
 3. Si te pasaron un repo en `$ARGUMENTS`, trabajá solo en `$T/.wt/<repo>`. Si no, seguí el orden de ejecución del plan. Si `$ARGUMENTS` incluye `--no-delegate`, hacé todo vos.
 4. Identificá la próxima tarea sin tildar y arrancá por ahí (así se retoma sin perder nada).
 
 ## 1. Reglas de trabajo
 - **Solo se tocan archivos dentro de los worktrees (`$T/.wt/<repo>`).** Nunca los repos base de `REPOS_ROOT`.
 - Una tarea a la vez: implementar, correr tests y lint, verificar lo que dice la tarea y recién ahí tildarla en `plan.md`.
-- Un commit por tarea, con el formato de la config. Default: `<ID> T<n>: descripción corta`. **No pushees**: eso es de `/flow:ship`.
+- **Al cerrar cada tarea**, según "Commits en implement":
+  - `stage` (default): `git add` de los archivos de la tarea y anotá en el Log de `status.md` `T<n>: <archivos>`. **No commitees:** el usuario revisa el diff y el commit lo hace `/flow:ship` con su aprobación (o él a mano).
+  - `por-tarea`: un commit por tarea, con el formato de la config. Default: `<ID> T<n>: descripción corta`.
+- **No pushees** en ningún modo: eso es de `/flow:ship`.
+- Antes de arrancar una tarea, el worktree no debería tener cambios sin stagear (solo lo de tareas anteriores, en staging o commiteado). Si los hay y no son tuyos, preguntá antes de seguir.
 - Respetá "Datos sensibles" de la config. Siempre: nada de `.env` ni credenciales; solo datos sintéticos en tests y fixtures.
 - Si otro agente implementa otro repo del mismo ticket, releé `decisions.md` antes de cada tarea.
 
@@ -38,9 +42,9 @@ Solo si la config dice "Delegar tareas: sí", `opencode` está instalado y la ta
    - Corré tests y lint vos mismo (no confíes en lo que reporta el modelo).
    - Chequeá el criterio de verificación de la tarea.
 5. **Resultado:**
-   - **OK** → commit y tildá la tarea.
-   - **Fallas chicas** → corregilas vos y commiteá.
-   - **Mal encaminada** → `git checkout -- . && git clean -fd` en ese worktree (solo cambios sin commitear de esta tarea), y reintentá una vez con el brief mejorado y el error concreto. Si vuelve a fallar, hacela vos.
+   - **OK** → stageá (o commiteá, en modo `por-tarea`) y tildá la tarea.
+   - **Fallas chicas** → corregilas vos y stageá (o commiteá).
+   - **Mal encaminada** → `git checkout -- . && git clean -fd` en ese worktree y reintentá una vez, con el brief mejorado y el error concreto. Si vuelve a fallar, hacela vos. Ese comando descarta solo lo que no está en staging, o sea lo de esta tarea; lo que quedó en staging de tareas anteriores, archivos nuevos incluidos, se conserva. Por eso la salida del modelo no se stagea hasta verificarla.
 6. **Registrá** en el Log de `status.md`: `T<n> delegada a <modelo>: ok | corregida (qué) | rehecha`. Ese registro es lo que sirve para comparar modelos.
 
 ## 3. Protocolo de desvíos

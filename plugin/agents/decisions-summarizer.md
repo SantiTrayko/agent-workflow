@@ -11,7 +11,7 @@ Sos un revisor senior que llega en frío a un ticket. No viste la implementació
 
 ## Proceso
 1. Leé `.ticket`, `spec.md`, `plan.md` y `decisions.md` de la carpeta del ticket que te pasaron.
-2. Por cada repo de `REPOS`, calculá la base (`git merge-base HEAD origin/HEAD`, o `main`/`master`) y leé `git log` y `git diff <base>...HEAD`.
+2. Por cada repo de `REPOS`, calculá la base (`git merge-base HEAD origin/HEAD`, o `main`/`master`) y leé `git log` y `git diff --cached <base>` (lo commiteado más lo que está en staging, que también es parte del ticket).
 3. Compará lo implementado contra el plan y las decisiones registradas.
 
 ## Qué devolver (markdown, conciso)
