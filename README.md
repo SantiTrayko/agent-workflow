@@ -3,6 +3,8 @@
 Flujo por fases para trabajar tickets con agentes: **refine → plan → implement → review → ship**.
 Cada fase deja un archivo en la carpeta del ticket y la siguiente lo lee. Sin copy-paste entre chats.
 
+Guía completa, con diagrama: [`docs/guia.md`](docs/guia.md) · [`docs/guia.pdf`](docs/guia.pdf).
+
 Tiene dos partes:
 - **`ticket`** (terminal): crea la carpeta del ticket, los worktrees y la branch.
 - **Plugin `flow`** (Claude Code): `/flow:refine`, `/flow:plan`, `/flow:implement`, `/flow:review`, `/flow:ship`, `/flow:status`, `/flow:help`, más los subagentes `decisions-summarizer`, `ui-verifier`, `challenger` (Opus, alternativa a `flow-challenger` de OpenCode) y `shipper` (Haiku).
@@ -77,14 +79,15 @@ agent-workflow/
 ├── .claude-plugin/marketplace.json   # marketplace local
 ├── plugin/                           # plugin "flow"
 │   ├── skills/{refine,plan,implement,review,ship,status,help}/SKILL.md
-│   └── agents/{decisions-summarizer,ui-verifier,shipper}.md
+│   └── agents/{decisions-summarizer,ui-verifier,challenger,shipper}.md
 ├── opencode/agents/{flow-coder,flow-reviewer,flow-challenger}.md
 ├── bin/ticket
+├── docs/                             # guia.md y guia.pdf
 ├── templates/                        # spec, plan, decisions, status, agent-workflow
 └── install.sh
 
 ~/tickets/growcore-12-login-google/
-├── .ticket  status.md  spec.md  plan.md  decisions.md
+├── .ticket  status.md  spec.md  plan.md  challenge.md  decisions.md
 ├── review.md  pr-growcore.md  ui-review.md  ui-evidence/
 └── .wt/growcore/                     # worktree en feat/12-login-google (oculto para Obsidian)
 ```
